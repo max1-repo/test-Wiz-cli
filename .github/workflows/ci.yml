@@ -1,4 +1,4 @@
-name: Simple CI Pipeline(s)
+name: Simple CI Pipeline
 
 on:
   push:
@@ -27,11 +27,11 @@ jobs:
         with:
           python-version: "3.11"
 
-    - name: Install dependencies
-      run: pip install -r /Users/mhyppolite/gitHub_yahoo/test-Wiz-cli/requirements.txt
+      - name: Install dependencies
+        run: pip install -r /Users/mhyppolite/gitHub_yahoo/test-Wiz-cli/requirements.txt
 
-    - name: Lint
-      run: flake8 .
+      - name: Lint
+        run: flake8 .
 
-    - name: Run tests
-      run: pytest
+      - name: Run tests
+        run: pytest
