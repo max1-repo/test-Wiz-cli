@@ -1,0 +1,254 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  ⚠️ INTENTIONALLY MISCONFIGURED CloudFormation template for testing and education.
+  This stack creates multiple insecure resources on purpose. DO NOT USE IN PROD.
+
+Parameters:
+  AmiId:
+    Type: String
+    Default: ami-12345678
+    Description: Insecure hardcoded AMI placeholder (may be outdated/unknown origin)
+  InstanceAZ:
+    Type: String
+    Default: us-east-1a
+    Description: Hardcoded AZ (no HA, may not match your account/region)
+  DBPassword:
+    Type: String
+    Default: Password123
+    NoEcho: false        # ❌ Bad: password will show up in console/events
+    Description: Intentionally weak DB password (visible in plaintext)
+  KeyName:
+    Type: String
+    Default: insecure-key
+    Description: Insecure/untracked key pair name
+
+Resources:
+
+  # -------------------- Networking & Security Groups --------------------
+  InsecureVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: false    # ❌ Bad: breaks name resolution patterns
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: insecure-vpc
+
+  InsecureSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref InsecureVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true    # ❌ Public by default
+      AvailabilityZone: !Ref InstanceAZ
+
+  OpenSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "❌ Wide-open SG allowing ALL inbound traffic"
+      VpcId: !Ref InsecureVPC
+      SecurityGroupIngress:
+        - IpProtocol: -1           # ❌ All protocols
+          CidrIp: 0.0.0.0/0        # ❌ From anywhere
+      SecurityGroupEgress:
+        - IpProtocol: -1           # ❌ Unrestricted egress
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: open-sg
+
+  # -------------------- EC2 with public exposure & unencrypted storage --------------------
+  InsecureInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: t2.micro            # ❌ Legacy burstable type
+      KeyName: !Ref KeyName
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          AssociatePublicIpAddress: true   # ❌ Public IP
+          SubnetId: !Ref InsecureSubnet
+          GroupSet: [ !Ref OpenSecurityGroup ]
+      IamInstanceProfile: !Ref AdminInstanceProfile  # ❌ Admin on compute
+      Monitoring: false                    # ❌ No detailed monitoring
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            Encrypted: false               # ❌ Unencrypted root volume
+            DeleteOnTermination: false     # ❌ Orphan risk
+
+  ExtraUnencryptedVolume:
+    Type: AWS::EC2::Volume
+    Properties:
+      AvailabilityZone: !Ref InstanceAZ
+      Size: 10
+      Encrypted: false                     # ❌ Unencrypted EBS data volume
+
+  AttachExtraVolume:
+    Type: AWS::EC2::VolumeAttachment
+    Properties:
+      InstanceId: !Ref InsecureInstance
+      VolumeId: !Ref ExtraUnencryptedVolume
+      Device: /dev/sdf
+
+  # -------------------- IAM: overly permissive principals --------------------
+  AdminRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: insecure-admin-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess   # ❌ Full admin
+      Policies:
+        - PolicyName: wildcard-inline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"                            # ❌ Star/Star
+
+  AdminInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [ !Ref AdminRole ]
+
+  InsecureUser:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: insecure-user
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess   # ❌ Human admin
+
+  InsecureAccessKey:
+    Type: AWS::IAM::AccessKey
+    Properties:
+      UserName: !Ref InsecureUser                        # ❌ Long-lived AK/SK
+
+  # -------------------- S3: public bucket, ACLs, no encryption/versioning --------------------
+  PublicBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      AccessControl: PublicReadWrite                     # ❌ Public RW ACL
+      PublicAccessBlockConfiguration:                    # ❌ Disable all blocks
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+      VersioningConfiguration:
+        Status: Suspended                                # ❌ No versioning
+      BucketEncryption:                                  # ❌ Omitted keys -> no default encryption
+        ServerSideEncryptionConfiguration: []            # Explicitly empty
+      LoggingConfiguration:                              # ❌ No server access logs
+        DestinationBucketName: !Ref "AWS::NoValue"
+      Tags:
+        - Key: data
+          Value: public-and-plaintext
+
+  # -------------------- RDS: public, unencrypted, no backups --------------------
+  InsecureDB:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: insecure-db
+      Engine: mysql
+      EngineVersion: "8.0"              # May drift without patching policy
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      MasterUsername: admin
+      MasterUserPassword: !Ref DBPassword   # ❌ Weak/plaintext param
+      PubliclyAccessible: true              # ❌ Internet-exposed DB
+      StorageEncrypted: false               # ❌ No encryption at rest
+      BackupRetentionPeriod: 0              # ❌ No backups
+      DeletionProtection: false             # ❌ Easy to destroy
+      MultiAZ: false                        # ❌ Single-AZ
+      CopyTagsToSnapshot: false
+      VPCSecurityGroups: [ !Ref OpenSecurityGroup ]
+      DBSubnetGroupName: !Ref DBSubnetGroup
+
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Insecure single-subnet group
+      SubnetIds: [ !Ref InsecureSubnet ]    # ❌ Single subnet (no HA)
+
+  # -------------------- Lambda: plaintext secrets, wildcard role, no DLQ --------------------
+  InsecureLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: insecure-lambda-role
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: { Service: lambda.amazonaws.com }
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: lambda-wildcard
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: "*"
+                Resource: "*"                # ❌ Everything, everywhere
+  InsecureLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: insecure-fn
+      Runtime: python3.9
+      Handler: index.handler
+      Role: !GetAtt InsecureLambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          SECRET: "hardcoded-plaintext-secret"   # ❌ Plaintext secret
+      Code:
+        ZipFile: |
+          def handler(event, context):
+              # Prints secret to logs (❌)
+              print("SECRET:", __import__("os").environ.get("SECRET"))
+              return {"status": "insecure-success"}
+
+  # -------------------- SQS / SNS: no encryption, public topic policy --------------------
+  InsecureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: insecure-queue
+      # ❌ No KMS encryption; no DLQ; default retention/visibility
+
+  InsecureTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: insecure-topic
+
+  InsecureTopicPolicy:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      Topics: [ !Ref InsecureTopic ]
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowEveryoneEverything
+            Effect: Allow
+            Principal: "*"
+            Action:
+              - "SNS:Publish"
+              - "SNS:Subscribe"
+              - "SNS:Receive"
+              - "SNS:AddPermission"
+            Resource: !Ref InsecureTopic         # ❌ Public publish/subscribe
+
+Outputs:
+  PublicBucketName:
+    Value: !Ref PublicBucket
+    Description: Publicly readable & writable bucket (intentionally insecure)
+  InstanceId:
+    Value: !Ref InsecureInstance
+    Description: EC2 instance with public IP and admin role
+  InsecureAccessKeyId:
+    Value: !Ref InsecureAccessKey
+    Description: Long-lived access key ID (secret key in stack outputs/events)
